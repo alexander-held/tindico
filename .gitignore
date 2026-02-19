@@ -1,1 +1,6 @@
+.claude/
+.pixi/
+__pycache__
+
+# token handling
 .env

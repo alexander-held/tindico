@@ -1,0 +1,18 @@
+[project]
+name = "tindico"
+version = "0.1.0"
+description = "Terminal UI for CERN Indico + macOS Calendar sync"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[dependencies]
+python = ">=3.11"
+
+[pypi-dependencies]
+requests = "*"
+textual = "*"
+icalendar = "*"
+tindico = { path = ".", editable = true }
+
+[tasks]
+tindico = "tindico"
