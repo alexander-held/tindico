@@ -4,8 +4,9 @@ from enum import Enum, auto
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import ScrollableContainer
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, OptionList, Static
+from textual.widgets.option_list import Option
 
 from .api import get_category_events, get_favorite_events, get_timetable
 from .calendar_sync import open_in_calendar, update_existing_event_url
@@ -22,23 +23,61 @@ class ViewMode(Enum):
     CATEGORY = auto()
 
 
-class DetailPanel(ScrollableContainer):
-    """Scrollable panel showing timetable/contributions for the highlighted event."""
+class DetailPanel(OptionList):
+    """Panel showing timetable/contributions for the highlighted event as a selectable list."""
 
     DEFAULT_CSS = """
     DetailPanel {
         height: 8;
+        border: none;
         border-top: solid $accent;
         padding: 0 1;
     }
+    DetailPanel:focus {
+        border: none;
+        border-top: solid $accent;
+    }
     """
 
-    def compose(self) -> ComposeResult:
-        yield Static("No event selected", id="detail-content")
+    def __init__(self) -> None:
+        super().__init__(Option("No event selected", disabled=True))
+        self._contributions: dict[str, Contribution] = {}
 
-    def update(self, content: str) -> None:
-        self.query_one("#detail-content", Static).update(content)
-        self.scroll_home(animate=False)
+    def set_message(self, text: str) -> None:
+        """Show a simple message (Loading..., No event selected, etc.)."""
+        self._contributions = {}
+        self.clear_options()
+        self.add_option(Option(text, disabled=True))
+
+    def set_contributions(self, contributions: list[Contribution]) -> None:
+        """Populate the list with contributions. Those with attachments get a * suffix."""
+        self._contributions = {}
+        self.clear_options()
+        if not contributions:
+            self.add_option(Option("No contributions", disabled=True))
+            return
+        for i, c in enumerate(contributions):
+            time_str = c.start_dt.strftime("%H:%M")
+            speakers = ", ".join(c.speakers)
+            label = f"{time_str}  {_escape_rich(c.title)}"
+            if speakers:
+                label += f" \\[{speakers}]"
+            if c.attachments:
+                label += " *"
+            opt_id = f"contrib_{i}"
+            self.add_option(Option(label, id=opt_id))
+            self._contributions[opt_id] = c
+
+    def on_focus(self) -> None:
+        if self._contributions and self.highlighted is None:
+            self.highlighted = 0
+
+    def selected_contribution(self) -> Contribution | None:
+        """Return the currently highlighted contribution, if any."""
+        if self.highlighted is None:
+            return None
+        option = self.get_option_at_index(self.highlighted)
+        return self._contributions.get(option.id)
 
 
 class StatusBar(Static):
@@ -55,6 +94,45 @@ class StatusBar(Static):
     """
 
 
+class AttachmentPicker(ModalScreen[str | None]):
+    """Modal screen to pick from multiple attachments."""
+
+    DEFAULT_CSS = """
+    AttachmentPicker {
+        align: center middle;
+    }
+    AttachmentPicker OptionList {
+        width: 60;
+        height: auto;
+        max-height: 16;
+        border: solid $accent;
+        background: $surface;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, attachments: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self._attachments = attachments
+
+    def compose(self) -> ComposeResult:
+        ol = OptionList()
+        for i, (title, _url) in enumerate(self._attachments):
+            ol.add_option(Option(title, id=f"att_{i}"))
+        yield ol
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        idx = int(event.option_id.split("_")[1])
+        _title, url = self._attachments[idx]
+        self.dismiss(url)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class IndicoApp(App):
     """CERN Indico Terminal UI."""
 
@@ -66,11 +144,13 @@ class IndicoApp(App):
     """
 
     BINDINGS = [
+        Binding("left", "category_drilldown", "Category", priority=True),
+        Binding("right", "open_browser", "Open in Browser", priority=True),
+        Binding("m", "open_material", "Open Material"),
         Binding("c", "sync_calendar", "Calendar Sync"),
         Binding("u", "update_url", "Update URL"),
-        Binding("left", "category_drilldown", "← Category", priority=True),
-        Binding("right", "open_browser", "Open in Browser", priority=True),
         Binding("escape", "back_to_favorites", "Back", priority=True),
+        Binding("tab", "toggle_focus", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -119,7 +199,7 @@ class IndicoApp(App):
         table.add_columns("Day", "Date", "Time", "Title", "Category")
         self._row_key_to_event = {}
         self._current_detail_event_id = None
-        self.query_one(DetailPanel).update("No event selected")
+        self.query_one(DetailPanel).set_message("No event selected")
 
         prev_date = None
         for ev in self.events:
@@ -163,39 +243,27 @@ class IndicoApp(App):
         self._current_detail_event_id = ev.id
         panel = self.query_one(DetailPanel)
         if ev.id in self._timetable_cache:
-            panel.update(self._format_contributions(self._timetable_cache[ev.id]))
+            panel.set_contributions(self._timetable_cache[ev.id])
         else:
-            panel.update("Loading...")
+            panel.set_message("Loading...")
             self._fetch_timetable(ev.id)
 
     @work(exclusive=True, group="timetable", thread=True)
     def _fetch_timetable(self, event_id: int) -> None:
         try:
             contributions = get_timetable(event_id)
-        except Exception:
+        except Exception as e:
             contributions = []
+            self.call_from_thread(
+                self.query_one(StatusBar).update, f"Timetable error: {e}"
+            )
         self._timetable_cache[event_id] = contributions
         # Only update panel if still viewing this event
         if self._current_detail_event_id == event_id:
             self.call_from_thread(
-                self.query_one(DetailPanel).update,
-                self._format_contributions(contributions),
+                self.query_one(DetailPanel).set_contributions,
+                contributions,
             )
-
-    @staticmethod
-    def _format_contributions(contributions: list[Contribution]) -> str:
-        if not contributions:
-            return "No contributions"
-        lines = []
-        for c in contributions:
-            time_str = c.start_dt.strftime("%H:%M")
-            title = _escape_rich(c.title)
-            speakers = ", ".join(c.speakers)
-            if speakers:
-                lines.append(f"{time_str}  {title} \\[{speakers}]")
-            else:
-                lines.append(f"{time_str}  {title}")
-        return "\n".join(lines)
 
     def _selected_event(self) -> IndicoEvent | None:
         table = self.query_one(DataTable)
@@ -266,7 +334,7 @@ class IndicoApp(App):
         table.add_columns("Day", "Date", "Time", "Title")
         self._row_key_to_event = {}
         self._current_detail_event_id = None
-        self.query_one(DetailPanel).update("No event selected")
+        self.query_one(DetailPanel).set_message("No event selected")
 
         focus_row = 0
         row_index = 0
@@ -300,6 +368,9 @@ class IndicoApp(App):
         )
 
     def action_back_to_favorites(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            self.screen.dismiss(None)
+            return
         if self._view_mode == ViewMode.FAVORITES:
             return
         self._restore_favorites_view()
@@ -339,3 +410,39 @@ class IndicoApp(App):
             return
         subprocess.run(["open", event.url], check=True)
         status.update(f"Opened {event.url}")
+
+    def action_toggle_focus(self) -> None:
+        """Toggle focus between DataTable and the detail panel OptionList."""
+        table = self.query_one(DataTable)
+        panel = self.query_one(DetailPanel)
+        if table.has_focus:
+            panel.focus()
+        else:
+            table.focus()
+
+    def action_open_material(self) -> None:
+        """Open attachments for the selected contribution."""
+        status = self.query_one(StatusBar)
+        panel = self.query_one(DetailPanel)
+        contrib = panel.selected_contribution()
+        if contrib is None:
+            status.update("No contribution selected")
+            return
+        if not contrib.attachments:
+            status.update("No attachments")
+            return
+        if len(contrib.attachments) == 1:
+            _title, url = contrib.attachments[0]
+            subprocess.run(["open", url], check=True)
+            status.update(f"Opened {_title}")
+        else:
+            self.push_screen(
+                AttachmentPicker(contrib.attachments),
+                callback=self._on_attachment_picked,
+            )
+
+    def _on_attachment_picked(self, url: str | None) -> None:
+        if url is None:
+            return
+        subprocess.run(["open", url], check=True)
+        self.query_one(StatusBar).update(f"Opened attachment")

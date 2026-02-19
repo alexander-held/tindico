@@ -1,7 +1,7 @@
 import requests
 
 from .config import INDICO_API_TOKEN, INDICO_BASE_URL
-from .models import Contribution, IndicoEvent, contribution_from_json, event_from_json
+from .models import Contribution, IndicoEvent, _parse_attachments, contribution_from_json, event_from_json
 
 
 def _get(endpoint: str, params: dict | None = None) -> dict:
@@ -34,13 +34,42 @@ def get_timetable(event_id: int) -> list[Contribution]:
         for _entry_id, entry in entries.items():
             # Top-level entries (breaks, contributions)
             if "startDate" in entry:
-                contributions.append(contribution_from_json(entry))
+                contributions.append(contribution_from_json(entry, INDICO_BASE_URL))
             # Session blocks contain nested entries
             for nested in entry.get("entries", {}).values():
                 if "startDate" in nested:
-                    contributions.append(contribution_from_json(nested))
+                    contributions.append(contribution_from_json(nested, INDICO_BASE_URL))
     contributions.sort(key=lambda c: c.start_dt)
+
+    # The timetable endpoint often has files=null; enrich from event contributions endpoint
+    contribs_without = [c for c in contributions if not c.attachments]
+    if contribs_without:
+        _enrich_attachments(event_id, contributions)
+
     return contributions
+
+
+def _enrich_attachments(event_id: int, contributions: list[Contribution]) -> None:
+    """Fetch attachment data from the event contributions endpoint and merge it in."""
+    try:
+        data = _get(
+            f"/export/event/{event_id}.json",
+            params={"detail": "contributions"},
+        )
+    except Exception:
+        return
+    # Build a lookup: title → list of attachments from the contributions endpoint
+    att_by_title: dict[str, list[tuple[str, str]]] = {}
+    for item in data.get("results", []):
+        for c in item.get("contributions") or []:
+            title = c.get("title", "")
+            atts = _parse_attachments(c, INDICO_BASE_URL)
+            if atts:
+                att_by_title[title] = atts
+    # Merge into contributions that lack attachments
+    for c in contributions:
+        if not c.attachments and c.title in att_by_title:
+            c.attachments = att_by_title[c.title]
 
 
 def get_category_events(

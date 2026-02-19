@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -34,20 +34,52 @@ class Contribution:
     start_dt: datetime
     end_dt: datetime
     speakers: list[str]
+    attachments: list[tuple[str, str]] = field(default_factory=list)
 
 
-def contribution_from_json(entry: dict) -> Contribution:
+def _parse_attachments(entry: dict, base_url: str) -> list[tuple[str, str]]:
+    """Extract (title, url) pairs from both attachments.files and folders[].attachments[]."""
+    attachments: list[tuple[str, str]] = []
+
+    # Timetable API style: attachments.files[]
+    att_data = entry.get("attachments") or {}
+    for f in att_data.get("files") or []:
+        title = f.get("title", "attachment")
+        url = f.get("download_url", "")
+        if url and not url.startswith("http"):
+            url = base_url + url
+        if url:
+            attachments.append((title, url))
+
+    # Event contributions API style: folders[].attachments[]
+    for folder in entry.get("folders") or []:
+        for f in folder.get("attachments") or []:
+            title = f.get("title", "attachment")
+            url = f.get("download_url", "")
+            if url and not url.startswith("http"):
+                url = base_url + url
+            if url:
+                attachments.append((title, url))
+
+    return attachments
+
+
+def contribution_from_json(entry: dict, base_url: str = "") -> Contribution:
     """Build a Contribution from a timetable entry."""
     speakers = []
     for person in entry.get("presenters", []):
         name = person.get("name") or f"{person.get('first_name', '')} {person.get('last_name', '')}".strip()
         if name:
             speakers.append(name)
+
+    attachments = _parse_attachments(entry, base_url)
+
     return Contribution(
         title=entry.get("title", ""),
         start_dt=parse_indico_datetime(entry["startDate"]),
         end_dt=parse_indico_datetime(entry["endDate"]),
         speakers=speakers,
+        attachments=attachments,
     )
 
 
