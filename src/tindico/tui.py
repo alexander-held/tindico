@@ -59,11 +59,11 @@ class DetailPanel(OptionList):
         for i, c in enumerate(contributions):
             time_str = c.start_dt.strftime("%H:%M")
             speakers = ", ".join(c.speakers)
-            label = f"{time_str}  {_escape_rich(c.title)}"
+            label = f"[bold]{time_str}[/bold]  {_escape_rich(c.title)}"
             if speakers:
-                label += f" \\[{speakers}]"
+                label += f" [dim italic]\\[{speakers}][/dim italic]"
             if c.attachments:
-                label += " *"
+                label += " [bold]●[/bold]"
             opt_id = f"contrib_{i}"
             self.add_option(Option(label, id=opt_id))
             self._contributions[opt_id] = c
@@ -156,6 +156,12 @@ class IndicoApp(App):
 
     SEPARATOR_KEY_PREFIX = "_sep_"
 
+    @property
+    def _accent_hex(self) -> str:
+        """Get the current theme's accent color as a hex string."""
+        cs = self.current_theme.to_color_system()
+        return cs.accent.hex
+
     events: list[IndicoEvent] = []
     _row_key_to_event: dict[str, IndicoEvent] = {}
     _timetable_cache: dict[int, list[Contribution]] = {}
@@ -177,6 +183,16 @@ class IndicoApp(App):
         table = self.query_one(DataTable)
         table.add_columns("Day", "Date", "Time", "Title", "Category")
         self._load_events()
+
+    def watch_theme(self, old_value: str, new_value: str) -> None:
+        """Re-render the table when the theme changes so colors update."""
+        if self._view_mode == ViewMode.FAVORITES:
+            self._restore_favorites_view()
+        elif self._category_id and self._category_id in self._category_events_cache:
+            self._populate_category_table(
+                self._category_events_cache[self._category_id],
+                self._category_name,
+            )
 
     def _load_events(self) -> None:
         status = self.query_one(StatusBar)
@@ -204,17 +220,25 @@ class IndicoApp(App):
         prev_date = None
         for ev in self.events:
             date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
-            if prev_date is not None and date_str != prev_date:
+            first_of_day = date_str != prev_date
+            if prev_date is not None and first_of_day:
                 sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
-                table.add_row("─" * 3, "─" * 6, "─" * 5, "─" * 42, "─" * 20, key=sep_key)
+                table.add_row(
+                    f"[dim]{'─' * 3}[/dim]",
+                    f"[dim]{'─' * 6}[/dim]",
+                    f"[dim]{'─' * 5}[/dim]",
+                    f"[dim]{'─' * 42}[/dim]",
+                    f"[dim]{'─' * 20}[/dim]",
+                    key=sep_key,
+                )
             prev_date = date_str
             row_key = str(ev.id)
             table.add_row(
-                ev.start_dt.strftime("%a"),
-                date_str,
+                f"[dim]{ev.start_dt.strftime('%a')}[/dim]" if first_of_day else "",
+                date_str if first_of_day else "",
                 ev.start_dt.strftime("%H:%M"),
-                ev.title[:42],
-                ev.category[:20],
+                f"[{self._accent_hex}]{_escape_rich(ev.title[:42])}[/{self._accent_hex}]",
+                f"[dim italic]{_escape_rich(ev.category[:20])}[/dim italic]",
                 key=row_key,
             )
             self._row_key_to_event[row_key] = ev
@@ -341,17 +365,24 @@ class IndicoApp(App):
         prev_date = None
         for ev in events:
             date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
-            if prev_date is not None and date_str != prev_date:
+            first_of_day = date_str != prev_date
+            if prev_date is not None and first_of_day:
                 sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
-                table.add_row("─" * 3, "─" * 6, "─" * 5, "─" * 50, key=sep_key)
+                table.add_row(
+                    f"[dim]{'─' * 3}[/dim]",
+                    f"[dim]{'─' * 6}[/dim]",
+                    f"[dim]{'─' * 5}[/dim]",
+                    f"[dim]{'─' * 50}[/dim]",
+                    key=sep_key,
+                )
                 row_index += 1
             prev_date = date_str
             row_key = str(ev.id)
             table.add_row(
-                ev.start_dt.strftime("%a"),
-                date_str,
+                f"[dim]{ev.start_dt.strftime('%a')}[/dim]" if first_of_day else "",
+                date_str if first_of_day else "",
                 ev.start_dt.strftime("%H:%M"),
-                ev.title[:50],
+                f"[{self._accent_hex}]{_escape_rich(ev.title[:50])}[/{self._accent_hex}]",
                 key=row_key,
             )
             if ev.id == focus_event_id:
