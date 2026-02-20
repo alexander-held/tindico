@@ -1,6 +1,8 @@
 import subprocess
 from enum import Enum, auto
 
+from rich.style import Style
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,6 +13,9 @@ from textual.widgets.option_list import Option
 from .api import get_category_events, get_favorite_events, get_timetable
 from .calendar_sync import open_in_calendar, update_existing_event_url
 from .models import Contribution, IndicoEvent
+
+DIM = Style(dim=True)
+DIM_ITALIC = Style(dim=True, italic=True)
 
 
 def _escape_rich(text: str) -> str:
@@ -56,15 +61,18 @@ class DetailPanel(OptionList):
         if not contributions:
             self.add_option(Option("No contributions", disabled=True))
             return
-        accent = self.app.current_theme.to_color_system().accent.hex
+        accent_hex = self.app.current_theme.to_color_system().accent.hex
         for i, c in enumerate(contributions):
             time_str = c.start_dt.strftime("%H:%M")
             speakers = ", ".join(c.speakers)
-            label = f"[bold]{time_str}[/bold]  [{accent}]{_escape_rich(c.title)}[/{accent}]"
+            label = Text()
+            label.append(time_str, style="bold")
+            label.append("  ")
+            label.append(c.title, style=Style(color=accent_hex))
             if speakers:
-                label += f" [dim italic]\\[{speakers}][/dim italic]"
+                label.append(f" [{speakers}]", style=DIM_ITALIC)
             if c.attachments:
-                label += " [bold]●[/bold]"
+                label.append(" ●", style="bold")
             opt_id = f"contrib_{i}"
             self.add_option(Option(label, id=opt_id))
             self._contributions[opt_id] = c
@@ -189,7 +197,11 @@ class IndicoApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        table.add_columns("Day", "Date", "Time", "Title", "Category")
+        table.add_column("Day", width=3)
+        table.add_column("Date", width=6)
+        table.add_column("Time", width=5)
+        table.add_column("Title", width=42)
+        table.add_column("Category", width=20)
         self._load_events()
 
     def watch_theme(self, old_value: str, new_value: str) -> None:
@@ -220,11 +232,16 @@ class IndicoApp(App):
         self.sub_title = ""
         table = self.query_one(DataTable)
         table.clear(columns=True)
-        table.add_columns("Day", "Date", "Time", "Title", "Category")
+        table.add_column("Day", width=3)
+        table.add_column("Date", width=6)
+        table.add_column("Time", width=5)
+        table.add_column("Title", width=42)
+        table.add_column("Category", width=20)
         self._row_key_to_event = {}
         self._current_detail_event_id = None
         self.query_one(DetailPanel).set_message("No event selected")
 
+        accent = Style(color=self._accent_hex)
         prev_date = None
         for ev in self.events:
             date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
@@ -232,21 +249,21 @@ class IndicoApp(App):
             if prev_date is not None and first_of_day:
                 sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
                 table.add_row(
-                    f"[dim]{'─' * 3}[/dim]",
-                    f"[dim]{'─' * 6}[/dim]",
-                    f"[dim]{'─' * 5}[/dim]",
-                    f"[dim]{'─' * 42}[/dim]",
-                    f"[dim]{'─' * 20}[/dim]",
+                    Text("─" * 3, style=DIM),
+                    Text("─" * 6, style=DIM),
+                    Text("─" * 5, style=DIM),
+                    Text("─" * 42, style=DIM),
+                    Text("─" * 20, style=DIM),
                     key=sep_key,
                 )
             prev_date = date_str
             row_key = str(ev.id)
             table.add_row(
-                f"[dim]{ev.start_dt.strftime('%a')}[/dim]" if first_of_day else "",
-                date_str if first_of_day else "",
-                ev.start_dt.strftime("%H:%M"),
-                f"[{self._accent_hex}]{_escape_rich(ev.title[:42])}[/{self._accent_hex}]",
-                f"[dim italic]{_escape_rich(ev.category[:20])}[/dim italic]",
+                Text(ev.start_dt.strftime("%a"), style=DIM) if first_of_day else Text(""),
+                Text(date_str) if first_of_day else Text(""),
+                Text(ev.start_dt.strftime("%H:%M")),
+                Text(ev.title[:42], style=accent),
+                Text(ev.category[:20], style=DIM_ITALIC),
                 key=row_key,
             )
             self._row_key_to_event[row_key] = ev
@@ -363,11 +380,15 @@ class IndicoApp(App):
         self.sub_title = f"Category: {_escape_rich(category_name)}"
         table = self.query_one(DataTable)
         table.clear(columns=True)
-        table.add_columns("Day", "Date", "Time", "Title")
+        table.add_column("Day", width=3)
+        table.add_column("Date", width=6)
+        table.add_column("Time", width=5)
+        table.add_column("Title", width=42)
         self._row_key_to_event = {}
         self._current_detail_event_id = None
         self.query_one(DetailPanel).set_message("No event selected")
 
+        accent = Style(color=self._accent_hex)
         focus_row = 0
         row_index = 0
         prev_date = None
@@ -377,20 +398,20 @@ class IndicoApp(App):
             if prev_date is not None and first_of_day:
                 sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
                 table.add_row(
-                    f"[dim]{'─' * 3}[/dim]",
-                    f"[dim]{'─' * 6}[/dim]",
-                    f"[dim]{'─' * 5}[/dim]",
-                    f"[dim]{'─' * 50}[/dim]",
+                    Text("─" * 3, style=DIM),
+                    Text("─" * 6, style=DIM),
+                    Text("─" * 5, style=DIM),
+                    Text("─" * 42, style=DIM),
                     key=sep_key,
                 )
                 row_index += 1
             prev_date = date_str
             row_key = str(ev.id)
             table.add_row(
-                f"[dim]{ev.start_dt.strftime('%a')}[/dim]" if first_of_day else "",
-                date_str if first_of_day else "",
-                ev.start_dt.strftime("%H:%M"),
-                f"[{self._accent_hex}]{_escape_rich(ev.title[:50])}[/{self._accent_hex}]",
+                Text(ev.start_dt.strftime("%a"), style=DIM) if first_of_day else Text(""),
+                Text(date_str) if first_of_day else Text(""),
+                Text(ev.start_dt.strftime("%H:%M")),
+                Text(ev.title[:42], style=accent),
                 key=row_key,
             )
             if ev.id == focus_event_id:
