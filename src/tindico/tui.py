@@ -56,10 +56,11 @@ class DetailPanel(OptionList):
         if not contributions:
             self.add_option(Option("No contributions", disabled=True))
             return
+        accent = self.app.current_theme.to_color_system().accent.hex
         for i, c in enumerate(contributions):
             time_str = c.start_dt.strftime("%H:%M")
             speakers = ", ".join(c.speakers)
-            label = f"[bold]{time_str}[/bold]  {_escape_rich(c.title)}"
+            label = f"[bold]{time_str}[/bold]  [{accent}]{_escape_rich(c.title)}[/{accent}]"
             if speakers:
                 label += f" [dim italic]\\[{speakers}][/dim italic]"
             if c.attachments:
@@ -122,12 +123,20 @@ class AttachmentPicker(ModalScreen[str | None]):
         ol = OptionList()
         for i, (title, _url) in enumerate(self._attachments):
             ol.add_option(Option(title, id=f"att_{i}"))
+        ol.highlighted = 0
         yield ol
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         idx = int(event.option_id.split("_")[1])
         _title, url = self._attachments[idx]
         self.dismiss(url)
+
+    def select_highlighted(self) -> None:
+        """Open the currently highlighted attachment."""
+        ol = self.query_one(OptionList)
+        if ol.highlighted is not None:
+            _title, url = self._attachments[ol.highlighted]
+            self.dismiss(url)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -146,7 +155,6 @@ class IndicoApp(App):
     BINDINGS = [
         Binding("left", "category_drilldown", "Category", priority=True),
         Binding("right", "open_browser", "Open in Browser", priority=True),
-        Binding("m", "open_material", "Open Material"),
         Binding("c", "sync_calendar", "Calendar Sync"),
         Binding("u", "update_url", "Update URL"),
         Binding("escape", "back_to_favorites", "Back", priority=True),
@@ -434,6 +442,12 @@ class IndicoApp(App):
             status.update(f"URL update error: {e}")
 
     def action_open_browser(self) -> None:
+        if isinstance(self.screen, AttachmentPicker):
+            self.screen.select_highlighted()
+            return
+        if self.query_one(DetailPanel).has_focus:
+            self.action_open_material()
+            return
         status = self.query_one(StatusBar)
         event = self._selected_event()
         if not event:
