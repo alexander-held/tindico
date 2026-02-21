@@ -1,5 +1,8 @@
 import subprocess
+from dataclasses import dataclass, field
 from enum import Enum, auto
+
+import requests
 
 from rich.style import Style
 from rich.text import Text
@@ -10,7 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .api import get_category_events, get_favorite_events, get_timetable
+from .api import get_category_events, get_category_info, get_favorite_events, get_timetable
 from .calendar_sync import (
     find_calendar_events,
     open_in_calendar,
@@ -33,15 +36,24 @@ class ViewMode(Enum):
     CATEGORY = auto()
 
 
+@dataclass
+class NavEntry:
+    view_mode: ViewMode
+    category_id: int = 0
+    category_name: str = ""
+    cursor_row: int = 0
+
+
 class DetailPanel(OptionList):
     """Panel showing timetable/contributions for the highlighted event as a selectable list."""
 
     DEFAULT_CSS = """
     DetailPanel {
-        height: 8;
+        height: 10;
         border: none;
         border-top: solid $accent;
         padding: 0 1;
+        scrollbar-size: 0 0;
     }
     DetailPanel:focus {
         border: none;
@@ -99,10 +111,8 @@ class StatusBar(Static):
 
     DEFAULT_CSS = """
     StatusBar {
-        dock: bottom;
         height: 1;
-        background: $accent;
-        color: $text;
+        color: $text-muted;
         padding: 0 1;
     }
     """
@@ -231,12 +241,13 @@ class IndicoApp(App):
     CSS = """
     DataTable {
         height: 1fr;
+        scrollbar-size: 0 0;
     }
     """
 
     BINDINGS = [
-        Binding("left", "category_drilldown", "Category", priority=True),
-        Binding("right", "open_browser", "Open in Browser", priority=True),
+        Binding("left", "navigate_parent", "Parent", priority=True),
+        Binding("right", "open", "Open", priority=True),
         Binding("c", "sync_calendar", "Calendar Sync"),
         Binding("u", "update_url", "Update URL"),
         Binding("escape", "back_to_favorites", "Back", priority=True),
@@ -245,6 +256,7 @@ class IndicoApp(App):
     ]
 
     SEPARATOR_KEY_PREFIX = "_sep_"
+    SUBCAT_KEY_PREFIX = "_subcat_"
 
     @property
     def _accent_hex(self) -> str:
@@ -258,12 +270,27 @@ class IndicoApp(App):
         self._row_key_to_event: dict[str, IndicoEvent] = {}
         self._timetable_cache: dict[int, list[Contribution]] = {}
         self._category_events_cache: dict[int, list[IndicoEvent]] = {}
+        self._category_info_cache: dict[int, dict] = {}
         self._current_detail_event_id: int | None = None
-        self._view_mode: ViewMode = ViewMode.FAVORITES
-        self._category_id: int = 0
-        self._category_name: str = ""
-        self._favorites_cursor_row: int = 0
+        self._nav_stack: list[NavEntry] = [NavEntry(ViewMode.FAVORITES)]
+        self._subcat_names: dict[int, str] = {}
         self._update_url_event: IndicoEvent | None = None
+
+    @property
+    def _current_nav(self) -> NavEntry:
+        return self._nav_stack[-1]
+
+    @property
+    def _view_mode(self) -> ViewMode:
+        return self._current_nav.view_mode
+
+    @property
+    def _category_id(self) -> int:
+        return self._current_nav.category_id
+
+    @property
+    def _category_name(self) -> str:
+        return self._current_nav.category_name
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -306,7 +333,9 @@ class IndicoApp(App):
 
     def _restore_favorites_view(self) -> None:
         """Rebuild the DataTable with cached favorites events."""
-        self._view_mode = ViewMode.FAVORITES
+        # Save cursor from current nav before resetting
+        saved_cursor = self._nav_stack[0].cursor_row if self._nav_stack else 0
+        self._nav_stack = [NavEntry(ViewMode.FAVORITES, cursor_row=saved_cursor)]
         self.sub_title = ""
         table = self.query_one(DataTable)
         table.clear(columns=True)
@@ -350,9 +379,9 @@ class IndicoApp(App):
         status.update(f"Loaded {len(self.events)} events")
 
         # Restore cursor position
-        if self._favorites_cursor_row > 0:
+        if saved_cursor > 0:
             try:
-                table.move_cursor(row=self._favorites_cursor_row)
+                table.move_cursor(row=saved_cursor)
             except Exception:
                 pass
 
@@ -416,29 +445,132 @@ class IndicoApp(App):
 
     # -- Actions --------------------------------------------------------
 
-    def action_category_drilldown(self) -> None:
-        if self._view_mode == ViewMode.CATEGORY:
-            # Already in category view — left means go back
-            self.action_back_to_favorites()
-            return
-        ev = self._selected_event()
-        if ev is None or ev.category_id == 0:
-            self.query_one(StatusBar).update("No category for this event")
-            return
-        # Save cursor position
+    def _save_cursor(self) -> None:
+        """Save the current cursor row into the top nav entry."""
         table = self.query_one(DataTable)
-        self._favorites_cursor_row = table.cursor_row or 0
-        self._load_category_events(ev.category_id, ev.category, ev.id)
+        self._current_nav.cursor_row = table.cursor_row or 0
+
+    def _pop_to_previous_view(self) -> None:
+        """Restore the view from the current top of the nav stack after a pop."""
+        saved_cursor = self._current_nav.cursor_row
+        if self._view_mode == ViewMode.FAVORITES:
+            self._restore_favorites_view()
+        else:
+            cat_id = self._category_id
+            if cat_id in self._category_events_cache:
+                self._populate_category_table(
+                    self._category_events_cache[cat_id], self._category_name
+                )
+                try:
+                    self.query_one(DataTable).move_cursor(row=saved_cursor)
+                except Exception:
+                    pass
+
+    def _push_category(self, category_id: int, category_name: str, focus_event_id: int = 0) -> None:
+        """Save cursor, push a new category onto the nav stack, and load it."""
+        self._save_cursor()
+        self._nav_stack.append(NavEntry(ViewMode.CATEGORY, category_id, category_name))
+        self._load_category_events(category_id, category_name, focus_event_id)
+
+    def action_navigate_parent(self) -> None:
+        """Left arrow: navigate to parent category."""
+        if isinstance(self.screen, ModalScreen):
+            self.screen.dismiss(None)
+            return
+        if self._view_mode == ViewMode.FAVORITES:
+            ev = self._selected_event()
+            if ev is None or ev.category_id == 0:
+                self.query_one(StatusBar).update("No category for this event")
+                return
+            # Go to the event's own category
+            self._push_category(ev.category_id, ev.category, ev.id)
+        else:
+            self._navigate_to_parent_of(self._category_id, self._category_name)
+
+    @work(exclusive=True, group="cat_info", thread=True)
+    def _navigate_to_parent_of(self, category_id: int, category_name: str, focus_event_id: int = 0) -> None:
+        """Fetch category info and navigate to its parent."""
+        status = self.query_one(StatusBar)
+        self.call_from_thread(status.update, "Loading parent category...")
+        self.call_from_thread(self._set_table_loading, True)
+
+        def _restore() -> None:
+            self.call_from_thread(self._set_table_loading, False)
+            self.call_from_thread(status.update, "")
+
+        try:
+            info = self._fetch_category_info(category_id)
+        except Exception as e:
+            _restore()
+            self.call_from_thread(self.notify, f"Cannot access parent category: {e}", severity="error")
+            return
+        if info["parent_id"] is None:
+            _restore()
+            self.call_from_thread(self.notify, "Already at top-level category")
+            return
+        # Check we can actually access the parent before navigating
+        try:
+            self._fetch_category_info(info["parent_id"])
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                _restore()
+                self.call_from_thread(
+                    self.notify,
+                    f"Access denied to '{info['parent_name']}'",
+                    severity="error",
+                )
+                return
+            raise
+        self.call_from_thread(
+            self._push_category, info["parent_id"], info["parent_name"], focus_event_id
+        )
+
+    def _fetch_category_info(self, category_id: int) -> dict:
+        """Get category info, using cache if available."""
+        if category_id in self._category_info_cache:
+            return self._category_info_cache[category_id]
+        info = get_category_info(category_id)
+        self._category_info_cache[category_id] = info
+        return info
+
+    def action_open(self) -> None:
+        """Right arrow: open event in browser or open subcategory."""
+        if isinstance(self.screen, CalendarEventPicker):
+            self.screen.action_confirm()
+            return
+        if isinstance(self.screen, AttachmentPicker):
+            self.screen.select_highlighted()
+            return
+        if self.query_one(DetailPanel).has_focus:
+            self.action_open_material()
+            return
+        table = self.query_one(DataTable)
+        if table.cursor_row is None:
+            return
+        row_key = table.ordered_rows[table.cursor_row].key.value
+        # Check if it's a subcategory row
+        if row_key.startswith(self.SUBCAT_KEY_PREFIX):
+            subcat_id = int(row_key[len(self.SUBCAT_KEY_PREFIX):])
+            subcat_name = self._subcat_names.get(subcat_id, "")
+            self._push_category(subcat_id, subcat_name)
+            return
+        # Otherwise open event in browser
+        ev = self._row_key_to_event.get(row_key)
+        if ev:
+            subprocess.run(["open", ev.url])
+            self.query_one(StatusBar).update(f"Opened {ev.url}")
+
+    def _set_table_loading(self, loading: bool) -> None:
+        self.query_one(DataTable).loading = loading
 
     @work(exclusive=True, group="load_view", thread=True)
     def _load_category_events(
         self, category_id: int, category_name: str, focus_event_id: int = 0
     ) -> None:
-        self._category_id = category_id
-        self._category_name = category_name
         self.call_from_thread(
             self.query_one(StatusBar).update, f"Loading category '{_escape_rich(category_name)}'..."
         )
+        self.call_from_thread(self._set_table_loading, True)
 
         if category_id in self._category_events_cache:
             events = self._category_events_cache[category_id]
@@ -446,15 +578,45 @@ class IndicoApp(App):
             try:
                 events = get_category_events(category_id)
             except Exception as e:
+                self.call_from_thread(self._set_table_loading, False)
+                # Pop the failed nav entry and stay where we were
+                if len(self._nav_stack) > 1:
+                    self._nav_stack.pop()
+                self.call_from_thread(self._pop_to_previous_view)
                 self.call_from_thread(
-                    self.query_one(StatusBar).update, f"Error: {e}"
+                    self.notify,
+                    f"Cannot access category: {e}",
+                    severity="error",
                 )
                 return
             self._category_events_cache[category_id] = events
 
+        # Show table immediately (without subcategories if info not cached yet)
         self.call_from_thread(
             self._populate_category_table, events, category_name, focus_event_id
         )
+
+        # Then fetch category info and re-render if subcategories were found
+        if category_id not in self._category_info_cache:
+            try:
+                info = self._fetch_category_info(category_id)
+                if info.get("subcategories"):
+                    self.call_from_thread(
+                        self._populate_category_table, events, category_name, focus_event_id
+                    )
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 403 and not events:
+                    # Export API returned empty + info returned 403 → restricted
+                    if len(self._nav_stack) > 1:
+                        self._nav_stack.pop()
+                    self.call_from_thread(self._pop_to_previous_view)
+                    self.call_from_thread(
+                        self.notify,
+                        f"Access denied to category '{category_name}'",
+                        severity="error",
+                    )
+            except Exception:
+                pass
 
     def _populate_category_table(
         self,
@@ -462,8 +624,9 @@ class IndicoApp(App):
         category_name: str,
         focus_event_id: int = 0,
     ) -> None:
-        """Rebuild DataTable for category view (no Category column)."""
-        self._view_mode = ViewMode.CATEGORY
+        """Rebuild DataTable for category view with subcategories and events."""
+        self.query_one(DataTable).loading = False
+        self._current_nav.view_mode = ViewMode.CATEGORY
         self.sub_title = f"Category: {_escape_rich(category_name)}"
         table = self.query_one(DataTable)
         table.clear(columns=True)
@@ -471,13 +634,49 @@ class IndicoApp(App):
         table.add_column("Date", width=6)
         table.add_column("Time", width=5)
         table.add_column("Title", width=42)
+        table.add_column("Category", width=20)
         self._row_key_to_event = {}
+        self._subcat_names = {}
         self._current_detail_event_id = None
         self.query_one(DetailPanel).set_message("No event selected")
 
         accent = Style(color=self._accent_hex)
-        focus_row = 0
+        cat_id = self._category_id
         row_index = 0
+        focus_row = 0
+        key_to_row: dict[str, int] = {}
+
+        # Add subcategory rows at the top
+        info = self._category_info_cache.get(cat_id)
+        subcats = info.get("subcategories", []) if info else []
+        for sub in subcats:
+            sub_id = sub["id"]
+            sub_title = sub["title"]
+            self._subcat_names[sub_id] = sub_title
+            row_key = f"{self.SUBCAT_KEY_PREFIX}{sub_id}"
+            table.add_row(
+                Text(""),
+                Text(""),
+                Text("  →", style="bold"),
+                Text(sub_title[:42], style=Style(color=self._accent_hex, bold=True)),
+                Text("subcategory", style=DIM_ITALIC),
+                key=row_key,
+            )
+            key_to_row[row_key] = row_index
+            row_index += 1
+
+        # Add separator between subcategories and events
+        if subcats:
+            table.add_row(
+                Text("─" * 3, style=DIM),
+                Text("─" * 6, style=DIM),
+                Text("─" * 5, style=DIM),
+                Text("─" * 42, style=DIM),
+                Text("─" * 20, style=DIM),
+                key=f"{self.SEPARATOR_KEY_PREFIX}subcats",
+            )
+            row_index += 1
+
         prev_date = None
         for ev in events:
             date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
@@ -489,6 +688,7 @@ class IndicoApp(App):
                     Text("─" * 6, style=DIM),
                     Text("─" * 5, style=DIM),
                     Text("─" * 42, style=DIM),
+                    Text("─" * 20, style=DIM),
                     key=sep_key,
                 )
                 row_index += 1
@@ -499,8 +699,10 @@ class IndicoApp(App):
                 Text(date_str) if first_of_day else Text(""),
                 Text(ev.start_dt.strftime("%H:%M")),
                 Text(ev.title[:42], style=accent),
+                Text(ev.category[:20], style=DIM_ITALIC),
                 key=row_key,
             )
+            key_to_row[row_key] = row_index
             if ev.id == focus_event_id:
                 focus_row = row_index
             row_index += 1
@@ -511,7 +713,7 @@ class IndicoApp(App):
 
         status = self.query_one(StatusBar)
         status.update(
-            f"{len(events)} events in '{_escape_rich(category_name)}' | ESC to go back"
+            f"{len(events)} events in '{_escape_rich(category_name)}'"
         )
 
     def action_back_to_favorites(self) -> None:
@@ -569,24 +771,6 @@ class IndicoApp(App):
                 status.update("Failed to update calendar event")
         except Exception as e:
             status.update(f"URL update error: {e}")
-
-    def action_open_browser(self) -> None:
-        if isinstance(self.screen, CalendarEventPicker):
-            self.screen.action_confirm()
-            return
-        if isinstance(self.screen, AttachmentPicker):
-            self.screen.select_highlighted()
-            return
-        if self.query_one(DetailPanel).has_focus:
-            self.action_open_material()
-            return
-        status = self.query_one(StatusBar)
-        event = self._selected_event()
-        if not event:
-            status.update("No event selected")
-            return
-        subprocess.run(["open", event.url])
-        status.update(f"Opened {event.url}")
 
     def action_toggle_focus(self) -> None:
         """Toggle focus between DataTable and the detail panel OptionList."""

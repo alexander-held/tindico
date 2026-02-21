@@ -99,3 +99,39 @@ def get_event(event_id: int) -> IndicoEvent:
     if not results:
         raise ValueError(f"Event {event_id} not found")
     return event_from_json(results[0])
+
+
+def get_category_info(category_id: int) -> dict:
+    """Fetch category info (parent + subcategories) via /category/<id>/info.
+
+    Returns {'id', 'title', 'parent_id', 'parent_name', 'subcategories': [{'id', 'title'}, ...]}
+    """
+    url = f"{INDICO_BASE_URL}/category/{category_id}/info"
+    headers = {"Authorization": f"Bearer {INDICO_API_TOKEN}"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    cat = data.get("category", {})
+
+    # parent_path is ancestors (root→...→parent), not including self
+    parent_id = None
+    parent_name = ""
+    parent_path = cat.get("parent_path", [])
+    if parent_path:
+        parent = parent_path[-1]
+        parent_id = parent.get("id")
+        parent_name = parent.get("title", "")
+
+    subcategories = [
+        {"id": sub["id"], "title": sub["title"]}
+        for sub in data.get("subcategories", [])
+    ]
+
+    return {
+        "id": cat.get("id", category_id),
+        "title": cat.get("title", ""),
+        "parent_id": parent_id,
+        "parent_name": parent_name,
+        "subcategories": subcategories,
+    }

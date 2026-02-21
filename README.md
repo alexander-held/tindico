@@ -20,8 +20,8 @@ pixi run tindico
 
 | Key | Action |
 |-----|--------|
-| `←` | Drill down into event's category (±30 days) |
-| `→` | Open event in browser / open material (when in detail panel) |
+| `←` | Navigate up into parent category (showing events within ±30 days) |
+| `→` | Open event in browser / open material (when in detail panel) / open category |
 | `Tab` | Toggle focus between event list and detail panel |
 | `ESC` | Back to favorites view |
 | `c` | Sync event to Calendar (.ics) |
