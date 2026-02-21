@@ -9,10 +9,6 @@ platforms = ["osx-arm64"]
 python = ">=3.11"
 
 [pypi-dependencies]
-requests = "*"
-textual = "*"
-icalendar = "*"
-pyobjc-framework-EventKit = "*"
 tindico = { path = ".", editable = true }
 
 [tasks]

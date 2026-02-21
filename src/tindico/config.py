@@ -22,3 +22,15 @@ _env = load_env()
 
 INDICO_BASE_URL: str = _env.get("INDICO_BASE_URL", "https://indico.cern.ch")
 INDICO_API_TOKEN: str = _env.get("INDICO_API_TOKEN", "")
+
+if not INDICO_API_TOKEN:
+    import sys
+
+    print(
+        "Error: INDICO_API_TOKEN not set.\n"
+        "Create a .env file in the project root with:\n"
+        "  INDICO_API_TOKEN=your_token_here\n"
+        "Get a token at https://indico.cern.ch/user/tokens/",
+        file=sys.stderr,
+    )
+    sys.exit(1)

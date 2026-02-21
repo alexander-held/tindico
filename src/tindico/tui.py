@@ -252,15 +252,18 @@ class IndicoApp(App):
         cs = self.current_theme.to_color_system()
         return cs.accent.hex
 
-    events: list[IndicoEvent] = []
-    _row_key_to_event: dict[str, IndicoEvent] = {}
-    _timetable_cache: dict[int, list[Contribution]] = {}
-    _category_events_cache: dict[int, list[IndicoEvent]] = {}
-    _current_detail_event_id: int | None = None
-    _view_mode: ViewMode = ViewMode.FAVORITES
-    _category_id: int = 0
-    _category_name: str = ""
-    _favorites_cursor_row: int = 0
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[IndicoEvent] = []
+        self._row_key_to_event: dict[str, IndicoEvent] = {}
+        self._timetable_cache: dict[int, list[Contribution]] = {}
+        self._category_events_cache: dict[int, list[IndicoEvent]] = {}
+        self._current_detail_event_id: int | None = None
+        self._view_mode: ViewMode = ViewMode.FAVORITES
+        self._category_id: int = 0
+        self._category_name: str = ""
+        self._favorites_cursor_row: int = 0
+        self._update_url_event: IndicoEvent | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -408,7 +411,7 @@ class IndicoApp(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         ev = self._row_key_to_event.get(event.row_key.value)
         if ev:
-            subprocess.run(["open", ev.url], check=True)
+            subprocess.run(["open", ev.url])
             self.query_one(StatusBar).update(f"Opened {ev.url}")
 
     # -- Actions --------------------------------------------------------
@@ -582,7 +585,7 @@ class IndicoApp(App):
         if not event:
             status.update("No event selected")
             return
-        subprocess.run(["open", event.url], check=True)
+        subprocess.run(["open", event.url])
         status.update(f"Opened {event.url}")
 
     def action_toggle_focus(self) -> None:
@@ -607,7 +610,7 @@ class IndicoApp(App):
             return
         if len(contrib.attachments) == 1:
             _title, url = contrib.attachments[0]
-            subprocess.run(["open", url], check=True)
+            subprocess.run(["open", url])
             status.update(f"Opened {_title}")
         else:
             self.push_screen(
@@ -618,5 +621,5 @@ class IndicoApp(App):
     def _on_attachment_picked(self, url: str | None) -> None:
         if url is None:
             return
-        subprocess.run(["open", url], check=True)
+        subprocess.run(["open", url])
         self.query_one(StatusBar).update(f"Opened attachment")

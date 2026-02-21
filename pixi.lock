@@ -407,11 +407,12 @@ packages:
 - pypi: ./
   name: tindico
   version: 0.1.0
-  sha256: e02c0210f7f46503f130b24f8c338ab09fdd47a8f66b98f256c3250e7f0cebd4
+  sha256: 5e65313734e226d0f88501e0423c1a4544afc341392a90b80385dd016bb446de
   requires_dist:
   - requests
   - textual
   - icalendar
+  - pyobjc-framework-eventkit
   requires_python: '>=3.11'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/tk-8.6.13-h010d191_3.conda

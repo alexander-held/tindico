@@ -12,8 +12,7 @@ Create an API token with read permissions: https://indico.cern.ch/user/tokens/.
 # Add your Indico API token to .env
 echo "INDICO_API_TOKEN=your_token_here" > .env
 
-# Install and run
-pixi install
+# Run tindico via pixi (https://pixi.prefix.dev/latest/installation/)
 pixi run tindico
 ```
 
@@ -29,17 +28,9 @@ pixi run tindico
 | `u` | Update existing calendar event with Indico URL |
 | `q` | Quit |
 
-## macOS Permissions
-
-The `c` and `u` keybindings use AppleScript to interact with Calendar.app. On first use, macOS will prompt you to grant permissions:
-
-- **System Settings > Privacy & Security > Automation** — allow your terminal to control Calendar
-- **System Settings > Privacy & Security > Calendars** — grant your terminal **Full Access** (not just "Add Events Only"), since tindico reads event properties to match and update them
-
-If the app hangs when syncing, check for a buried permission dialog or grant access manually in System Settings.
 
 ## How it works
 
 - Fetches upcoming events from your **favorited Indico categories**
 - Generates `.ics` files with stable UIDs (re-import updates, not duplicates)
-- Uses AppleScript to add Indico URLs to existing Calendar.app entries
+- Uses EventKit to add Indico URLs to existing Calendar.app entries
