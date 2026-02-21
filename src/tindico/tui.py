@@ -11,7 +11,12 @@ from textual.widgets import DataTable, Footer, Header, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .api import get_category_events, get_favorite_events, get_timetable
-from .calendar_sync import open_in_calendar, update_existing_event_url
+from .calendar_sync import (
+    find_calendar_events,
+    open_in_calendar,
+    set_event_url,
+    warm_event_store,
+)
 from .models import Contribution, IndicoEvent
 
 DIM = Style(dim=True)
@@ -150,6 +155,75 @@ class AttachmentPicker(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class CalendarEventPicker(ModalScreen[tuple | None]):
+    """Modal screen to pick a calendar event to update its URL."""
+
+    DEFAULT_CSS = """
+    CalendarEventPicker {
+        align: center middle;
+    }
+    CalendarEventPicker OptionList {
+        width: 70;
+        height: auto;
+        max-height: 20;
+        border: solid $accent;
+        background: $surface;
+    }
+    """
+
+    BINDINGS = [
+        Binding("right", "confirm", "Confirm", priority=True),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, candidates: list[dict], indico_start) -> None:
+        super().__init__()
+        self._candidates = candidates
+        self._indico_start = indico_start
+
+    def compose(self) -> ComposeResult:
+        ol = OptionList()
+        event_time = self._indico_start.replace(second=0, microsecond=0)
+        past_exact = False
+        for i, c in enumerate(self._candidates):
+            is_exact = c["start"].replace(second=0, microsecond=0) == event_time
+            if not is_exact and not past_exact:
+                past_exact = True
+                ol.add_option(Option(
+                    Text("───── other events ─────", style=DIM),
+                    disabled=True,
+                ))
+            time_str = c["start"].strftime("%H:%M")
+            label = Text()
+            label.append(time_str, style="bold")
+            label.append("  ")
+            label.append(c["title"])
+            label.append(f"  [{c['calendar']}]", style=DIM_ITALIC)
+            ol.add_option(Option(label, id=f"cal_{i}"))
+        ol.highlighted = 0
+        yield ol
+
+    def _dismiss_with(self, idx: int) -> None:
+        c = self._candidates[idx]
+        self.dismiss((c["ek_event_id"], c["ek_start_ts"]))
+
+    def action_confirm(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.highlighted is not None:
+            option = ol.get_option_at_index(ol.highlighted)
+            if option.id and option.id.startswith("cal_"):
+                self._dismiss_with(int(option.id.split("_")[1]))
+                return
+        self.dismiss(None)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id and event.option_id.startswith("cal_"):
+            self._dismiss_with(int(event.option_id.split("_")[1]))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class IndicoApp(App):
     """CERN Indico Terminal UI."""
 
@@ -196,6 +270,7 @@ class IndicoApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        warm_event_store()
         table = self.query_one(DataTable)
         table.add_column("Day", width=3)
         table.add_column("Date", width=6)
@@ -283,7 +358,16 @@ class IndicoApp(App):
             return
         key = event.row_key.value
         if key.startswith(self.SEPARATOR_KEY_PREFIX):
+            table = self.query_one(DataTable)
+            row = table.cursor_row
+            # Skip in the direction we were moving (compare to previous position)
+            prev = getattr(self, "_prev_cursor_row", 0)
+            direction = 1 if row >= prev else -1
+            target = row + direction
+            if 0 <= target < len(table.ordered_rows):
+                table.move_cursor(row=target)
             return
+        self._prev_cursor_row = self.query_one(DataTable).cursor_row
         ev = self._row_key_to_event.get(key)
         if ev is None:
             return
@@ -453,16 +537,40 @@ class IndicoApp(App):
         if not event:
             status.update("No event selected")
             return
+        self._update_url_event = event
         try:
-            ok = update_existing_event_url(event)
+            candidates = find_calendar_events(event)
+        except Exception as e:
+            status.update(f"URL update error: {e}")
+            return
+        if not candidates:
+            status.update("No calendar events found")
+            return
+        self.push_screen(
+            CalendarEventPicker(candidates, event.start_dt),
+            self._on_calendar_event_picked,
+        )
+
+    def _on_calendar_event_picked(self, result: tuple | None) -> None:
+        status = self.query_one(StatusBar)
+        if result is None:
+            status.update("Cancelled")
+            return
+        event_id, start_ts = result
+        event = self._update_url_event
+        try:
+            ok = set_event_url(event_id, start_ts, event.url)
             if ok:
-                status.update(f"Updated URL for '{_escape_rich(event.title)}'")
+                status.update("Updated calendar event URL")
             else:
-                status.update(f"No matching calendar event found for '{_escape_rich(event.title)}'")
+                status.update("Failed to update calendar event")
         except Exception as e:
             status.update(f"URL update error: {e}")
 
     def action_open_browser(self) -> None:
+        if isinstance(self.screen, CalendarEventPicker):
+            self.screen.action_confirm()
+            return
         if isinstance(self.screen, AttachmentPicker):
             self.screen.select_highlighted()
             return

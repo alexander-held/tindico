@@ -29,6 +29,15 @@ pixi run tindico
 | `u` | Update existing calendar event with Indico URL |
 | `q` | Quit |
 
+## macOS Permissions
+
+The `c` and `u` keybindings use AppleScript to interact with Calendar.app. On first use, macOS will prompt you to grant permissions:
+
+- **System Settings > Privacy & Security > Automation** — allow your terminal to control Calendar
+- **System Settings > Privacy & Security > Calendars** — grant your terminal **Full Access** (not just "Add Events Only"), since tindico reads event properties to match and update them
+
+If the app hangs when syncing, check for a buried permission dialog or grant access manually in System Settings.
+
 ## How it works
 
 - Fetches upcoming events from your **favorited Indico categories**
