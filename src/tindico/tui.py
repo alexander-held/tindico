@@ -1,4 +1,5 @@
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -44,6 +45,21 @@ class NavEntry:
     cursor_row: int = 0
 
 
+class DetailDivider(Static):
+    """Accent-colored divider between the table and detail panel."""
+
+    DEFAULT_CSS = """
+    DetailDivider {
+        height: 0;
+        border-top: solid $accent;
+        background: $surface;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("")
+
+
 class DetailPanel(OptionList):
     """Panel showing timetable/contributions for the highlighted event as a selectable list."""
 
@@ -51,13 +67,11 @@ class DetailPanel(OptionList):
     DetailPanel {
         height: 10;
         border: none;
-        border-top: solid $accent;
         padding: 0 1;
         scrollbar-size: 0 0;
     }
     DetailPanel:focus {
         border: none;
-        border-top: solid $accent;
     }
     """
 
@@ -243,6 +257,9 @@ class IndicoApp(App):
         height: 1fr;
         scrollbar-size: 0 0;
     }
+    DataTable LoadingIndicator, DetailPanel LoadingIndicator {
+        background: $surface;
+    }
     """
 
     BINDINGS = [
@@ -258,11 +275,53 @@ class IndicoApp(App):
     SEPARATOR_KEY_PREFIX = "_sep_"
     SUBCAT_KEY_PREFIX = "_subcat_"
 
+    _TABLE_COLUMNS = [
+        ("Day", 3),
+        ("Date", 6),
+        ("Time", 5),
+        ("Title", 42),
+        ("Category", 20),
+    ]
+
     @property
     def _accent_hex(self) -> str:
         """Get the current theme's accent color as a hex string."""
         cs = self.current_theme.to_color_system()
         return cs.accent.hex
+
+    def _setup_table_columns(self, table: DataTable) -> None:
+        """Clear and re-add standard columns to the table."""
+        table.clear(columns=True)
+        for name, width in self._TABLE_COLUMNS:
+            table.add_column(name, width=width)
+
+    def _add_separator_row(self, table: DataTable, key: str) -> None:
+        """Add a dim separator row to the table."""
+        table.add_row(
+            *(Text("─" * w, style=DIM) for _name, w in self._TABLE_COLUMNS),
+            key=key,
+        )
+
+    def _add_event_row(
+        self, table: DataTable, ev: IndicoEvent, first_of_day: bool, accent: Style,
+    ) -> str:
+        """Add an event row to the table and return its row key."""
+        row_key = str(ev.id)
+        table.add_row(
+            Text(ev.start_dt.strftime("%a"), style=DIM) if first_of_day else Text(""),
+            Text(ev.start_dt.strftime("%b %d").replace(" 0", "  ")) if first_of_day else Text(""),
+            Text(ev.start_dt.strftime("%H:%M")),
+            Text(ev.title[:42], style=accent),
+            Text(ev.category[:20], style=DIM_ITALIC),
+            key=row_key,
+        )
+        self._row_key_to_event[row_key] = ev
+        return row_key
+
+    def _open_url(self, url: str, label: str = "") -> None:
+        """Open a URL in the default browser and update the status bar."""
+        subprocess.run(["open", url])
+        self.query_one(StatusBar).update(f"Opened {label or url}")
 
     def __init__(self) -> None:
         super().__init__()
@@ -295,6 +354,7 @@ class IndicoApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield DataTable(cursor_type="row")
+        yield DetailDivider()
         yield DetailPanel()
         yield StatusBar("Loading...")
         yield Footer()
@@ -302,11 +362,8 @@ class IndicoApp(App):
     def on_mount(self) -> None:
         warm_event_store()
         table = self.query_one(DataTable)
-        table.add_column("Day", width=3)
-        table.add_column("Date", width=6)
-        table.add_column("Time", width=5)
-        table.add_column("Title", width=42)
-        table.add_column("Category", width=20)
+        for name, width in self._TABLE_COLUMNS:
+            table.add_column(name, width=width)
         self._load_events()
 
     def watch_theme(self, old_value: str, new_value: str) -> None:
@@ -338,12 +395,7 @@ class IndicoApp(App):
         self._nav_stack = [NavEntry(ViewMode.FAVORITES, cursor_row=saved_cursor)]
         self.sub_title = ""
         table = self.query_one(DataTable)
-        table.clear(columns=True)
-        table.add_column("Day", width=3)
-        table.add_column("Date", width=6)
-        table.add_column("Time", width=5)
-        table.add_column("Title", width=42)
-        table.add_column("Category", width=20)
+        self._setup_table_columns(table)
         self._row_key_to_event = {}
         self._current_detail_event_id = None
         self.query_one(DetailPanel).set_message("No event selected")
@@ -351,29 +403,12 @@ class IndicoApp(App):
         accent = Style(color=self._accent_hex)
         prev_date = None
         for ev in self.events:
-            date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
-            first_of_day = date_str != prev_date
+            date_key = ev.start_dt.strftime("%Y-%m-%d")
+            first_of_day = date_key != prev_date
             if prev_date is not None and first_of_day:
-                sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
-                table.add_row(
-                    Text("─" * 3, style=DIM),
-                    Text("─" * 6, style=DIM),
-                    Text("─" * 5, style=DIM),
-                    Text("─" * 42, style=DIM),
-                    Text("─" * 20, style=DIM),
-                    key=sep_key,
-                )
-            prev_date = date_str
-            row_key = str(ev.id)
-            table.add_row(
-                Text(ev.start_dt.strftime("%a"), style=DIM) if first_of_day else Text(""),
-                Text(date_str) if first_of_day else Text(""),
-                Text(ev.start_dt.strftime("%H:%M")),
-                Text(ev.title[:42], style=accent),
-                Text(ev.category[:20], style=DIM_ITALIC),
-                key=row_key,
-            )
-            self._row_key_to_event[row_key] = ev
+                self._add_separator_row(table, f"{self.SEPARATOR_KEY_PREFIX}{date_key}")
+            prev_date = date_key
+            self._add_event_row(table, ev, first_of_day, accent)
 
         status = self.query_one(StatusBar)
         status.update(f"Loaded {len(self.events)} events")
@@ -382,7 +417,7 @@ class IndicoApp(App):
         if saved_cursor > 0:
             try:
                 table.move_cursor(row=saved_cursor)
-            except Exception:
+            except (IndexError, KeyError):
                 pass
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -410,7 +445,7 @@ class IndicoApp(App):
         if ev.id in self._timetable_cache:
             panel.set_contributions(self._timetable_cache[ev.id])
         else:
-            panel.set_message("Loading...")
+            panel.loading = True
             self._fetch_timetable(ev.id)
 
     @work(exclusive=True, group="timetable", thread=True)
@@ -423,12 +458,15 @@ class IndicoApp(App):
                 self.query_one(StatusBar).update, f"Timetable error: {e}"
             )
         self._timetable_cache[event_id] = contributions
-        # Only update panel if still viewing this event
         if self._current_detail_event_id == event_id:
-            self.call_from_thread(
-                self.query_one(DetailPanel).set_contributions,
-                contributions,
-            )
+            self.call_from_thread(self._set_panel_contributions, contributions)
+        else:
+            self.call_from_thread(self._set_panel_loading, False)
+
+    def _set_panel_contributions(self, contributions: list[Contribution]) -> None:
+        panel = self.query_one(DetailPanel)
+        panel.loading = False
+        panel.set_contributions(contributions)
 
     def _selected_event(self) -> IndicoEvent | None:
         table = self.query_one(DataTable)
@@ -440,8 +478,7 @@ class IndicoApp(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         ev = self._row_key_to_event.get(event.row_key.value)
         if ev:
-            subprocess.run(["open", ev.url])
-            self.query_one(StatusBar).update(f"Opened {ev.url}")
+            self._open_url(ev.url)
 
     # -- Actions --------------------------------------------------------
 
@@ -463,7 +500,7 @@ class IndicoApp(App):
                 )
                 try:
                     self.query_one(DataTable).move_cursor(row=saved_cursor)
-                except Exception:
+                except (IndexError, KeyError):
                     pass
 
     def _push_category(self, category_id: int, category_name: str, focus_event_id: int = 0) -> None:
@@ -493,9 +530,11 @@ class IndicoApp(App):
         status = self.query_one(StatusBar)
         self.call_from_thread(status.update, "Loading parent category...")
         self.call_from_thread(self._set_table_loading, True)
+        self.call_from_thread(self._set_panel_loading, True)
 
         def _restore() -> None:
             self.call_from_thread(self._set_table_loading, False)
+            self.call_from_thread(self._set_panel_loading, False)
             self.call_from_thread(status.update, "")
 
         try:
@@ -557,11 +596,13 @@ class IndicoApp(App):
         # Otherwise open event in browser
         ev = self._row_key_to_event.get(row_key)
         if ev:
-            subprocess.run(["open", ev.url])
-            self.query_one(StatusBar).update(f"Opened {ev.url}")
+            self._open_url(ev.url)
 
     def _set_table_loading(self, loading: bool) -> None:
         self.query_one(DataTable).loading = loading
+
+    def _set_panel_loading(self, loading: bool) -> None:
+        self.query_one(DetailPanel).loading = loading
 
     @work(exclusive=True, group="load_view", thread=True)
     def _load_category_events(
@@ -615,8 +656,10 @@ class IndicoApp(App):
                         f"Access denied to category '{category_name}'",
                         severity="error",
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                self.call_from_thread(
+                    self.query_one(StatusBar).update, f"Category info error: {e}"
+                )
 
     def _populate_category_table(
         self,
@@ -626,87 +669,65 @@ class IndicoApp(App):
     ) -> None:
         """Rebuild DataTable for category view with subcategories and events."""
         self.query_one(DataTable).loading = False
+        self.query_one(DetailPanel).loading = False
         self._current_nav.view_mode = ViewMode.CATEGORY
         self.sub_title = f"Category: {_escape_rich(category_name)}"
         table = self.query_one(DataTable)
-        table.clear(columns=True)
-        table.add_column("Day", width=3)
-        table.add_column("Date", width=6)
-        table.add_column("Time", width=5)
-        table.add_column("Title", width=42)
-        table.add_column("Category", width=20)
+        self._setup_table_columns(table)
         self._row_key_to_event = {}
         self._subcat_names = {}
-        self._current_detail_event_id = None
-        self.query_one(DetailPanel).set_message("No event selected")
+        keep_detail = (
+            focus_event_id
+            and focus_event_id == self._current_detail_event_id
+            and focus_event_id in self._timetable_cache
+        )
+        if not keep_detail:
+            self._current_detail_event_id = None
+            self.query_one(DetailPanel).set_message("No event selected")
 
         accent = Style(color=self._accent_hex)
         cat_id = self._category_id
         row_index = 0
         focus_row = 0
-        key_to_row: dict[str, int] = {}
 
-        # Add subcategory rows at the top
-        info = self._category_info_cache.get(cat_id)
-        subcats = info.get("subcategories", []) if info else []
-        for sub in subcats:
-            sub_id = sub["id"]
-            sub_title = sub["title"]
-            self._subcat_names[sub_id] = sub_title
-            row_key = f"{self.SUBCAT_KEY_PREFIX}{sub_id}"
-            table.add_row(
-                Text(""),
-                Text(""),
-                Text("  →", style="bold"),
-                Text(sub_title[:42], style=Style(color=self._accent_hex, bold=True)),
-                Text("subcategory", style=DIM_ITALIC),
-                key=row_key,
-            )
-            key_to_row[row_key] = row_index
-            row_index += 1
-
-        # Add separator between subcategories and events
-        if subcats:
-            table.add_row(
-                Text("─" * 3, style=DIM),
-                Text("─" * 6, style=DIM),
-                Text("─" * 5, style=DIM),
-                Text("─" * 42, style=DIM),
-                Text("─" * 20, style=DIM),
-                key=f"{self.SEPARATOR_KEY_PREFIX}subcats",
-            )
-            row_index += 1
-
-        prev_date = None
-        for ev in events:
-            date_str = ev.start_dt.strftime("%b %d").replace(" 0", "  ")
-            first_of_day = date_str != prev_date
-            if prev_date is not None and first_of_day:
-                sep_key = f"{self.SEPARATOR_KEY_PREFIX}{date_str}"
+        # Suppress highlight events during rebuild when preserving detail panel
+        prevent = table.prevent(DataTable.RowHighlighted) if keep_detail else nullcontext()
+        with prevent:
+            # Add subcategory rows at the top
+            info = self._category_info_cache.get(cat_id)
+            subcats = info.get("subcategories", []) if info else []
+            for sub in subcats:
+                sub_id = sub["id"]
+                sub_title = sub["title"]
+                self._subcat_names[sub_id] = sub_title
+                row_key = f"{self.SUBCAT_KEY_PREFIX}{sub_id}"
                 table.add_row(
-                    Text("─" * 3, style=DIM),
-                    Text("─" * 6, style=DIM),
-                    Text("─" * 5, style=DIM),
-                    Text("─" * 42, style=DIM),
-                    Text("─" * 20, style=DIM),
-                    key=sep_key,
+                    Text(""),
+                    Text(""),
+                    Text("  →", style="bold"),
+                    Text(sub_title[:42], style=Style(color=self._accent_hex, bold=True)),
+                    Text("subcategory", style=DIM_ITALIC),
+                    key=row_key,
                 )
                 row_index += 1
-            prev_date = date_str
-            row_key = str(ev.id)
-            table.add_row(
-                Text(ev.start_dt.strftime("%a"), style=DIM) if first_of_day else Text(""),
-                Text(date_str) if first_of_day else Text(""),
-                Text(ev.start_dt.strftime("%H:%M")),
-                Text(ev.title[:42], style=accent),
-                Text(ev.category[:20], style=DIM_ITALIC),
-                key=row_key,
-            )
-            key_to_row[row_key] = row_index
-            if ev.id == focus_event_id:
-                focus_row = row_index
-            row_index += 1
-            self._row_key_to_event[row_key] = ev
+
+            # Add separator between subcategories and events
+            if subcats:
+                self._add_separator_row(table, f"{self.SEPARATOR_KEY_PREFIX}subcats")
+                row_index += 1
+
+            prev_date = None
+            for ev in events:
+                date_key = ev.start_dt.strftime("%Y-%m-%d")
+                first_of_day = date_key != prev_date
+                if prev_date is not None and first_of_day:
+                    self._add_separator_row(table, f"{self.SEPARATOR_KEY_PREFIX}{date_key}")
+                    row_index += 1
+                prev_date = date_key
+                self._add_event_row(table, ev, first_of_day, accent)
+                if ev.id == focus_event_id:
+                    focus_row = row_index
+                row_index += 1
 
         if focus_row > 0:
             table.move_cursor(row=focus_row)
@@ -794,8 +815,7 @@ class IndicoApp(App):
             return
         if len(contrib.attachments) == 1:
             _title, url = contrib.attachments[0]
-            subprocess.run(["open", url])
-            status.update(f"Opened {_title}")
+            self._open_url(url, _title)
         else:
             self.push_screen(
                 AttachmentPicker(contrib.attachments),
@@ -805,5 +825,4 @@ class IndicoApp(App):
     def _on_attachment_picked(self, url: str | None) -> None:
         if url is None:
             return
-        subprocess.run(["open", url])
-        self.query_one(StatusBar).update(f"Opened attachment")
+        self._open_url(url, "attachment")

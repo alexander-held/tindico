@@ -92,25 +92,12 @@ def get_category_events(
     return [event_from_json(item) for item in results]
 
 
-def get_event(event_id: int) -> IndicoEvent:
-    """Fetch a single event by ID."""
-    data = _get(f"/export/event/{event_id}.json")
-    results = data.get("results", [])
-    if not results:
-        raise ValueError(f"Event {event_id} not found")
-    return event_from_json(results[0])
-
-
 def get_category_info(category_id: int) -> dict:
     """Fetch category info (parent + subcategories) via /category/<id>/info.
 
     Returns {'id', 'title', 'parent_id', 'parent_name', 'subcategories': [{'id', 'title'}, ...]}
     """
-    url = f"{INDICO_BASE_URL}/category/{category_id}/info"
-    headers = {"Authorization": f"Bearer {INDICO_API_TOKEN}"}
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    data = _get(f"/category/{category_id}/info")
 
     cat = data.get("category", {})
 
