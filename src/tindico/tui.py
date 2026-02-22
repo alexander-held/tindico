@@ -94,7 +94,16 @@ class DetailPanel(OptionList):
             self.add_option(Option("No contributions", disabled=True))
             return
         accent_hex = self.app.current_theme.to_color_system().accent.hex
+        prev_date = None
         for i, c in enumerate(contributions):
+            date_key = c.start_dt.date()
+            if prev_date is not None and date_key != prev_date:
+                day_label = Text(
+                    f"── {c.start_dt.strftime('%A %b %d').replace(' 0', ' ')} ──",
+                    style=DIM,
+                )
+                self.add_option(Option(day_label, disabled=True))
+            prev_date = date_key
             time_str = c.start_dt.strftime("%H:%M")
             speakers = ", ".join(c.speakers)
             label = Text()
@@ -298,8 +307,8 @@ class IndicoApp(App):
     BINDINGS = [
         Binding("left", "navigate_parent", "Parent", priority=True),
         Binding("right", "open", "Open", priority=True),
-        Binding("r", "regex_filter", "Filter"),
-        Binding("c", "sync_calendar", "Calendar Sync"),
+        Binding("slash", "regex_filter", "Filter"),
+        Binding("c", "sync_calendar", "Calendar Export"),
         Binding("u", "update_url", "Update URL"),
         Binding("escape", "back_to_favorites", "Back", priority=True),
         Binding("tab", "toggle_focus", show=False),

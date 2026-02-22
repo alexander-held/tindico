@@ -24,11 +24,7 @@ def create_ics(event: IndicoEvent) -> Path:
     vevent.add("dtend", event.end_dt)
     vevent.add("url", event.url)
     vevent.add("location", vText(event.location))
-
-    description = event.description
-    if event.url:
-        description = f"{event.url}\n\n{description}" if description else event.url
-    vevent.add("description", description)
+    vevent.add("description", event.description)
 
     cal.add_component(vevent)
 
