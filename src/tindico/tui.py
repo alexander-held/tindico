@@ -1,3 +1,4 @@
+import re
 import subprocess
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, OptionList, Static
+from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .api import get_category_events, get_category_info, get_favorite_events, get_timetable
@@ -248,6 +249,38 @@ class CalendarEventPicker(ModalScreen[tuple | None]):
         self.dismiss(None)
 
 
+class RegexFilterScreen(ModalScreen[str | None]):
+    """Modal for entering a regex filter pattern."""
+
+    DEFAULT_CSS = """
+    RegexFilterScreen {
+        align: center middle;
+    }
+    RegexFilterScreen Input {
+        width: 60;
+        border: solid $accent;
+        background: $surface;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current: str = "") -> None:
+        super().__init__()
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        yield Input(value=self._current, placeholder="Regex filter (title/category)")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class IndicoApp(App):
     """CERN Indico Terminal UI."""
 
@@ -265,6 +298,7 @@ class IndicoApp(App):
     BINDINGS = [
         Binding("left", "navigate_parent", "Parent", priority=True),
         Binding("right", "open", "Open", priority=True),
+        Binding("r", "regex_filter", "Filter"),
         Binding("c", "sync_calendar", "Calendar Sync"),
         Binding("u", "update_url", "Update URL"),
         Binding("escape", "back_to_favorites", "Back", priority=True),
@@ -334,6 +368,7 @@ class IndicoApp(App):
         self._nav_stack: list[NavEntry] = [NavEntry(ViewMode.FAVORITES)]
         self._subcat_names: dict[int, str] = {}
         self._update_url_event: IndicoEvent | None = None
+        self._regex_filter: str = ""
 
     @property
     def _current_nav(self) -> NavEntry:
@@ -365,6 +400,12 @@ class IndicoApp(App):
         for name, width in self._TABLE_COLUMNS:
             table.add_column(name, width=width)
         self._load_events()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Disable arrow-key actions when a text input modal is open."""
+        if action in ("navigate_parent", "open") and isinstance(self.screen, RegexFilterScreen):
+            return False
+        return True
 
     def watch_theme(self, old_value: str, new_value: str) -> None:
         """Re-render the table when the theme changes so colors update."""
@@ -401,8 +442,13 @@ class IndicoApp(App):
         self.query_one(DetailPanel).set_message("No event selected")
 
         accent = Style(color=self._accent_hex)
+        regex = self._compile_regex_filter()
         prev_date = None
+        shown = 0
         for ev in self.events:
+            if regex and not (regex.search(ev.title) or regex.search(ev.category)):
+                continue
+            shown += 1
             date_key = ev.start_dt.strftime("%Y-%m-%d")
             first_of_day = date_key != prev_date
             if prev_date is not None and first_of_day:
@@ -411,7 +457,10 @@ class IndicoApp(App):
             self._add_event_row(table, ev, first_of_day, accent)
 
         status = self.query_one(StatusBar)
-        status.update(f"Loaded {len(self.events)} events")
+        if regex:
+            status.update(f"{shown}/{len(self.events)} events matching /{self._regex_filter}/")
+        else:
+            status.update(f"Loaded {len(self.events)} events")
 
         # Restore cursor position
         if saved_cursor > 0:
@@ -506,6 +555,7 @@ class IndicoApp(App):
     def _push_category(self, category_id: int, category_name: str, focus_event_id: int = 0) -> None:
         """Save cursor, push a new category onto the nav stack, and load it."""
         self._save_cursor()
+        self._regex_filter = ""
         self._nav_stack.append(NavEntry(ViewMode.CATEGORY, category_id, category_name))
         self._load_category_events(category_id, category_name, focus_event_id)
 
@@ -692,14 +742,19 @@ class IndicoApp(App):
 
         # Suppress highlight events during rebuild when preserving detail panel
         prevent = table.prevent(DataTable.RowHighlighted) if keep_detail else nullcontext()
+        regex = self._compile_regex_filter()
         with prevent:
             # Add subcategory rows at the top
             info = self._category_info_cache.get(cat_id)
             subcats = info.get("subcategories", []) if info else []
+            shown_subcats = False
             for sub in subcats:
                 sub_id = sub["id"]
                 sub_title = sub["title"]
                 self._subcat_names[sub_id] = sub_title
+                if regex and not regex.search(sub_title):
+                    continue
+                shown_subcats = True
                 row_key = f"{self.SUBCAT_KEY_PREFIX}{sub_id}"
                 table.add_row(
                     Text(""),
@@ -712,12 +767,16 @@ class IndicoApp(App):
                 row_index += 1
 
             # Add separator between subcategories and events
-            if subcats:
+            if shown_subcats:
                 self._add_separator_row(table, f"{self.SEPARATOR_KEY_PREFIX}subcats")
                 row_index += 1
 
             prev_date = None
+            shown = 0
             for ev in events:
+                if regex and not (regex.search(ev.title) or regex.search(ev.category)):
+                    continue
+                shown += 1
                 date_key = ev.start_dt.strftime("%Y-%m-%d")
                 first_of_day = date_key != prev_date
                 if prev_date is not None and first_of_day:
@@ -733,9 +792,14 @@ class IndicoApp(App):
             table.move_cursor(row=focus_row)
 
         status = self.query_one(StatusBar)
-        status.update(
-            f"{len(events)} events in '{_escape_rich(category_name)}'"
-        )
+        if regex:
+            status.update(
+                f"{shown}/{len(events)} events matching /{self._regex_filter}/ in '{_escape_rich(category_name)}'"
+            )
+        else:
+            status.update(
+                f"{len(events)} events in '{_escape_rich(category_name)}'"
+            )
 
     def action_back_to_favorites(self) -> None:
         if isinstance(self.screen, ModalScreen):
@@ -743,6 +807,7 @@ class IndicoApp(App):
             return
         if self._view_mode == ViewMode.FAVORITES:
             return
+        self._regex_filter = ""
         self._restore_favorites_view()
 
     def action_sync_calendar(self) -> None:
@@ -801,6 +866,40 @@ class IndicoApp(App):
             panel.focus()
         else:
             table.focus()
+
+    def _compile_regex_filter(self) -> re.Pattern | None:
+        """Compile the current regex filter, returning None if empty or invalid."""
+        if not self._regex_filter:
+            return None
+        try:
+            return re.compile(self._regex_filter, re.IGNORECASE)
+        except re.error:
+            return None
+
+    def action_regex_filter(self) -> None:
+        self.push_screen(
+            RegexFilterScreen(self._regex_filter),
+            self._on_regex_entered,
+        )
+
+    def _on_regex_entered(self, result: str | None) -> None:
+        if result is None:
+            return
+        # Validate regex before applying
+        if result:
+            try:
+                re.compile(result)
+            except re.error as e:
+                self.query_one(StatusBar).update(f"Invalid regex: {e}")
+                return
+        self._regex_filter = result
+        if self._view_mode == ViewMode.FAVORITES:
+            self._restore_favorites_view()
+        elif self._category_id and self._category_id in self._category_events_cache:
+            self._populate_category_table(
+                self._category_events_cache[self._category_id],
+                self._category_name,
+            )
 
     def action_open_material(self) -> None:
         """Open attachments for the selected contribution."""

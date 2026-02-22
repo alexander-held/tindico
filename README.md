@@ -23,7 +23,8 @@ pixi run tindico
 | `←` | Navigate up into parent category (showing events within ±30 days) |
 | `→` | Open event in browser / open material (when in detail panel) / open category |
 | `Tab` | Toggle focus between event list and detail panel |
-| `ESC` | Back to favorites view |
+| `r` | Filter events/categories by regex (case-insensitive) |
+| `ESC` | Back to favorites view / close window |
 | `c` | Sync event to Calendar (.ics) |
 | `u` | Update existing calendar event with Indico URL |
 | `q` | Quit |
