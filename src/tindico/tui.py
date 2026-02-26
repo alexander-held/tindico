@@ -76,6 +76,26 @@ class DetailPanel(OptionList):
     }
     """
 
+    # Fixed overhead: header(1) + footer(1) + status bar(1) + divider border(1) = 4 lines
+    _FIXED_LINES = 4
+    _MIN_HEIGHT = 1
+    _MAX_HEIGHT = 10
+    # Minimum lines reserved for the top panel (DataTable)
+    _MIN_TOP = 3
+
+    @staticmethod
+    def height_for_terminal(total_lines: int) -> int:
+        """Return a detail-panel height between 1 and 10, scaled to terminal size.
+
+        Prioritises the top panel: it always gets at least _MIN_TOP lines.
+        """
+        available = total_lines - DetailPanel._FIXED_LINES
+        top_minimum = DetailPanel._MIN_TOP
+        max_for_bottom = max(available - top_minimum, DetailPanel._MIN_HEIGHT)
+        # Give roughly 25% of available space to the detail panel
+        ideal = int(available * 0.25)
+        return max(DetailPanel._MIN_HEIGHT, min(ideal, DetailPanel._MAX_HEIGHT, max_for_bottom))
+
     def __init__(self) -> None:
         super().__init__(Option("No event selected", disabled=True))
         self._contributions: dict[str, Contribution] = {}
@@ -408,7 +428,16 @@ class IndicoApp(App):
         table = self.query_one(DataTable)
         for name, width in self._TABLE_COLUMNS:
             table.add_column(name, width=width)
+        self._sync_detail_height()
         self._load_events()
+
+    def on_resize(self) -> None:
+        self._sync_detail_height()
+
+    def _sync_detail_height(self) -> None:
+        """Adjust the detail panel height to fit the current terminal size."""
+        panel = self.query_one(DetailPanel)
+        panel.styles.height = DetailPanel.height_for_terminal(self.size.height)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         """Disable arrow-key actions when a text input modal is open."""
